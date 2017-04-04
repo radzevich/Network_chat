@@ -26,7 +26,7 @@
 struct externalProocol 
 {
     unsigned long sender_addr;
-    char[BUFF_SIZE] text;
+    char text[BUFF_SIZE];
 };
 
 //Structure for exchanging data between server's reading and writing processes.
@@ -34,7 +34,7 @@ struct internalProtocol
 {
     int sockfd;
     struct externalProocol external; 
-}
+};
 
 
 //Logging errors to ERROR_LOG.
@@ -87,19 +87,19 @@ int main(int argc, char *argv[])
 
     if ((childpid = fork()) == 0)
     {
-        sockfd_set = shmat(shmid, (* void)0, 0);
+        sockfd_set = shmat(shmid, NULL, 0);
     }
     else
     {
-        sockfd_set = shmat(shmid, (* void)0, 0)
+        sockfd_set = shmat(shmid, NULL, 0);
     }
 
     listen(sockfd, MAX_CONNECTION_NUM);
-    FD_ZERO(&sockfd_set);
+    FD_ZERO(sockfd_set);
 
-    for (;;)
+    while (!0)
     {
-        newsockfd = accept(sockfd, (struct sockaddr *) &clientAddr, &len);
+        newsockfd = accept(sockfd, NULL, NULL);
 
         if (newsockfd < 0)
             logError("accepting connection");
@@ -108,6 +108,8 @@ int main(int argc, char *argv[])
 
         FD_SET(newsockfd, sockfd_set);
     }
+
+    return 0;
 }
 
 
@@ -117,7 +119,6 @@ void chatting(fd_set *sockfd_set)
     int fd[2], nbytes;
     pid_t reading_pid;
     pipe(fd);
-    bool ready_sockd[MAX_CONNECTION_NUM];
 
     if((reading_pid = fork()) == -1)
     {
@@ -125,7 +126,7 @@ void chatting(fd_set *sockfd_set)
         exit(1);
     }
 
-    while(1)
+    while(!0)
     {
         if(reading_pid == 0)
         {
@@ -133,7 +134,7 @@ void chatting(fd_set *sockfd_set)
             close(fd[0]);
 
             //Checking sockets state, getting messages from clients and resending them to pipe.
-            if (waitToRead(sockfd_set, ready_sockfd) != 0)
+            if (waitToRead(sockfd_set) != 0)
                 readMessages(fd[1], sockfd_set);
         }
         else
@@ -156,7 +157,7 @@ int waitToRead(fd_set *sockfd_set)
     timeout.tv_sec = 3;
     timeout.tv_usec = 0;
     
-    ready_sockfd_num = select(sockfd->fd_count, &sockfd_set, NULL, NULL, &timeout);
+    ready_sockfd_num = select(sockfd_set->fd_count, &sockfd_set, NULL, NULL, &timeout);
 
     if (ready_sockfd_num == -1) 
         logError("select failed");
@@ -241,7 +242,10 @@ void writeMessages(int fd, fd_set *sockfd_set)
             retCode = sendto(sockfd_set->fd_array[i], confirmed_buff, strlen(confirmed_buff), 0, (struct sockaddr *)&clientAddr, len);
 
         if (retCode < 0)
+        {
+            close(sockfd_set->fd_array[i]);
             FD_CLR(sockfd_set->fd_array[i], sockfd_set);
+        }
         else                                                                 //TODO remove log
             logProgress("sending data..");        
     }   
@@ -268,32 +272,3 @@ void finishProgram(int returnValue)
 {
     exit(returnValue);
 }
-
-
-
-
-        
-
-        //inet_ntop(AF_INET, &(clientAddr.sin_addr), clientAddr, CL_HOST_NAME_LEN);
-
-        //creating a child process
-        if ((childpid = fork()) == 0)
-        {
-            //stop listening for new connections by the main process.
-            //the child will continue to listen.
-            //the main process now handles the connected client.
-            close(sockfd);
-
-            for (;;)
-            {
-                memset(buff, 0, BUFF_SIZE);
-                
-
-                messageHistory("Received data from", clientAddr.sin_addr.s_addr, buff);
-                memset(buff, 0, BUFF_SIZE);
-                
-
-                messageHistory("Sent data to", clientAddr.sin_addr.s_addr, buff);
-            }
-        }
-        close(newsockfd);
