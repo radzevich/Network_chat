@@ -1,8 +1,17 @@
-/* A simple server in the internet domain using TCP
+/* A simple server in the internet domain using UDP
    The port number is passed as an argument
-   This version runs forever, forking off a separate
-   process for each connection
+   This version runs forever, not forking off a separate
+   process for each connection, but adding them to set
+   and checking for ability to exchange data using select()
 */
+
+/**************************TODO************************* 
+* Add definition of resending message length.
+* Remove finishing program from logging.
+* Change sender address to it's nickname.
+* Something else but I don't remember.
+*******************************************************/ 
+
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -17,7 +26,7 @@
 #define CL_HOST_NAME_LEN 100
 #define MAX_CONNECTION_NUM 5
 #define BUFF_SIZE 1024
-#define NICKNAME_LANGTH 128
+#define NICKNAME_LENGTH 128
 #define PROGRESS_LOG stdout
 #define ERROR_LOG stderr
 #define MESSAGE_HISTORY stdout
@@ -47,6 +56,7 @@ struct sfd_set
 };
 
 typedef struct sfd_set sockfd_set;
+typedef struct externalProocol externalProocol;
 
 
 //Logging errors to ERROR_LOG.
@@ -67,6 +77,10 @@ void writeMessages(int fd, sockfd_set *s_set);
 void initializeSockfdSet(sockfd_set *s_set, fd_set *f_set);
 //Exchanging messages between reading and writing server processes
 void chatting(sockfd_set *s_set);
+//Conversion fields of external protocol structure to single text message for resending.
+void externalProocolToChar(externalProocol *external, char* buf);
+//Excluding sockfd from fd_set and internal array;
+int excludeFromSockfdSet(unsigned short sockfd, sockfd_set *s_set);
 
 
 
@@ -258,6 +272,7 @@ void writeMessages(int fd, sockfd_set *s_set)
     size_t bytesToWrite;
     size_t totalWritten = 0;
     char confirmed_buff[] = "confirmed";
+    char resending_mess[BUFF_SIZE + NICKNAME_LENGTH];
     int len = 0, ret_code = 0;
 
     //Reading text of message and sender's address from the pipe.
@@ -274,12 +289,13 @@ void writeMessages(int fd, sockfd_set *s_set)
     }
 
     len = sizeof(clientAddr);
+    externalProocolToChar(&local_mess.external, resending_mess);
 
     //Resending messages from server to clients.
     for (int i = 0; i < s_set->count; i++)
     {
         if (s_set->set[i] != local_mess.sockfd)
-            ret_code = sendto(s_set->set[i], ()local_mess.external, sizeof(struct externalProocol), 0, (struct sockaddr *)&clientAddr, len);
+            ret_code = sendto(s_set->set[i], resending_mess, NICKNAME_LENGTH + BUFF_SIZE, 0, (struct sockaddr *)&clientAddr, len);
         else
             //If current client is sender, server confirmes getting message instead of resending his message back.
             ret_code = sendto(s_set->set[i], confirmed_buff, strlen(confirmed_buff), 0, (struct sockaddr *)&clientAddr, len);
@@ -325,7 +341,7 @@ sockfd_set *createSockfdSet()
     s_set = (sockfd_set *)calloc(1, sizeof(sockfd_set));
 
     if (NULL != s_set) {
-        s_set->set = (unsigned short *)calloc(MAX_CONNECTION_NUM + 1, sizeof(unsigned short));
+        //s_set->set = (unsigned short *)calloc(MAX_CONNECTION_NUM + 1, sizeof(unsigned short));
         s_set->system_set = (fd_set *)calloc(1, sizeof(fd_set));
 
         if ((NULL == s_set->set) || (NULL == s_set->system_set)) {
@@ -344,8 +360,26 @@ sockfd_set *createSockfdSet()
     return s_set;
 }
 
-void externalProocolToChar(externalProocol *external, char* buf) {
-    
+//Conversion fields of external protocol structure to single text message for resending.
+void externalProocolToChar(externalProocol *external, char* buf) 
+{
+    int len = 0;
+/*
+    strlen(external->sender_addr);
+    memset(buf, 0, NICKNAME_LENGTH + BUFF_SIZE);
+
+    if (len > NICKNAME_LENGTH) {
+        len = NICKNAME_LENGTH;
+    }
+
+    for (int i = 0; i < len; i++) {
+        buf[i] = external->sender_addr[i];
+    */
+    len = strlen(external->text);
+
+    for (int i = NICKNAME_LENGTH; i < len; i++) {
+        buf[i] = external->text[i];
+    }
 }
 
 //Initializing sockfd structure.
@@ -359,14 +393,15 @@ void initializeSockfdSet(sockfd_set *s_set, fd_set *f_set)
 }
 
 
-void addToSockfdSet(sockfd_set *s_set, int sockfd)
+void addToSockfdSet(unsigned short sockfd, sockfd_set *s_set)
 {
     s_set->set[s_set->count] = sockfd;
     FD_SET(sockfd, (s_set->system_set));
     s_set->count++;
 } 
 
-int excludeFromSockfdSet(sockfd_set *s_set, int sockfd)
+//Excluding sockfd from fd_set and internal array;
+int excludeFromSockfdSet(unsigned short sockfd, sockfd_set *s_set)
 {
     int index = 0;
 
