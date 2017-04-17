@@ -5,12 +5,12 @@
    and checking for ability to exchange data using select()
 */
 
-/**************************TODO************************* 
+/**************************TODO*************************
 * Add definition of resending message length.
 * Remove finishing program from logging.
 * Change sender address to it's nickname.
 * Something else but I don't remember.
-*******************************************************/ 
+*******************************************************/
 
 #include <stdio.h>
 #include <unistd.h>
@@ -33,7 +33,7 @@
 
 
 //Structure for exchanging data between server and clients.
-struct externalProocol 
+struct externalProocol
 {
     unsigned long sender_addr;
     char text[BUFF_SIZE];
@@ -43,13 +43,13 @@ struct externalProocol
 struct internalProtocol
 {
     int sockfd;
-    struct externalProocol external; 
+    struct externalProocol external;
 };
 
 
 struct sfd_set
 {
-    fd_set *system_set;
+    fd_set system_set;
     unsigned short set[MAX_CONNECTION_NUM + 1];
     unsigned short count;
     unsigned short capacity;
@@ -67,20 +67,22 @@ void logProgress(const char *progressMessage);
 void messageHistory(const char *heandle, int clientName, char* message);
 //Closing program.
 void finishProgram(int returnValue);
-//Checking for unprocessed messages. 
+//Checking for unprocessed messages.
 int waitToRead(sockfd_set *s_set);
-//Getting messages from clients and writing them to pipe. 
+//Getting messages from clients and writing them to pipe.
 void readMessages(int fd, sockfd_set *s_set);
 //Reading data from the pipe and resending it to clients.
 void writeMessages(int fd, sockfd_set *s_set);
 //Initializing sockfd structure.
-void initializeSockfdSet(sockfd_set *s_set, fd_set *f_set);
+void initializeSockfdSet(sockfd_set *s_set);
 //Exchanging messages between reading and writing server processes
 void chatting(sockfd_set *s_set);
 //Conversion fields of external protocol structure to single text message for resending.
 void externalProocolToChar(externalProocol *external, char* buf);
 //Excluding sockfd from fd_set and internal array;
 int excludeFromSockfdSet(unsigned short sockfd, sockfd_set *s_set);
+//Adding sockfd to the set sructure.
+void addToSockfdSet(unsigned short sockfd, sockfd_set *s_set);
 
 
 
@@ -88,18 +90,20 @@ int excludeFromSockfdSet(unsigned short sockfd, sockfd_set *s_set);
 int main(int argc, char *argv[])
 {
     int sockfd, portno, retCode, newsockfd, sock_shmid, fd_shmid;
-    socklen_t len;
     sockfd_set *s_set = NULL;
-    fd_set *f_set = NULL;
+    socklen_t len;
     pid_t childpid;
     struct sockaddr_in addr;
-    char buff[BUFF_SIZE];
+    struct sockaddr cl_addr;
 
 
     if (argc < 2)
         logError("too few arguments\n");
 
+
     portno = atoi(argv[1]);
+    //portno = atoi("57050");
+    //shutdown(portno, SHUT_RDWR);
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
     if (sockfd < 0)
@@ -121,8 +125,8 @@ int main(int argc, char *argv[])
 
     logProgress("waiting for connections..");
 
-    sock_shmid = shmget(IPC_PRIVATE, sizeof(sockfd_set), IPC_CREAT | 0666);
-    fd_shmid = shmget(IPC_PRIVATE, sizeof(fd_set) * MAX_CONNECTION_NUM, IPC_CREAT | 0666);
+    sock_shmid = shmget(IPC_PRIVATE, sizeof(sockfd_set), IPC_CREAT | 0777);
+    //fd_shmid = shmget(IPC_PRIVATE, sizeof(fd_set) * MAX_CONNECTION_NUM, IPC_CREAT | 0666);
 
     //Creating child process and sharing memory with parental one.
     if ((childpid = fork()) == 0)
@@ -132,32 +136,31 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        if (NULL == (f_set = (fd_set *)shmat(fd_shmid, NULL, 0))) {
-            logError("allocating d_set");
-            return 1;
-        }
-
-        initializeSockfdSet(s_set, f_set);
         chatting(s_set);
     }
     else
     {
         s_set = (sockfd_set *)shmat(sock_shmid, NULL, 0);
-        f_set = (fd_set *)shmat(fd_shmid, NULL, 0);
-        initializeSockfdSet(s_set, f_set);
+        //f_set = (fd_set *)shmat(fd_shmid, NULL, 0);
+        initializeSockfdSet(s_set);
+        printf("initialized\n");
 
         listen(sockfd, MAX_CONNECTION_NUM);
 
         while (!0)
         {
-            newsockfd = accept(sockfd, NULL, NULL);
+            len = sizeof(cl_addr);
+            //newsockfd = accept(sockfd, &addr, &len);
+            newsockfd = accept(sockfd, &cl_addr, &len);
 
             if (newsockfd < 0)
                 logError("accepting connection");
             else
-                logProgress("Connection accepted..");
+                logProgress("connection accepted..");
 
-            FD_SET(newsockfd, s_set->system_set);
+            addToSockfdSet(newsockfd, s_set);
+
+            printf("socket added %d\n", newsockfd);
         }
     }
 
@@ -168,9 +171,10 @@ int main(int argc, char *argv[])
 //Exchanging messages between reading and writing server processes
 void chatting(sockfd_set *s_set)
 {
-    FD_ZERO(s_set->system_set);
-    int fd[2], nbytes;
+    FD_ZERO(&s_set->system_set);
+    int fd[2];
     pid_t reading_pid;
+
     pipe(fd);
 
     if((reading_pid = fork()) == -1)
@@ -178,50 +182,60 @@ void chatting(sockfd_set *s_set)
         logError("fork");
         exit(1);
     }
+    else if (0 == reading_pid){
+        logProgress("reading process created");
+    }
+    else {
+        logProgress("writing process created");
+    }
 
-    while(!0)
+
+    if(reading_pid == 0)
     {
-        if(reading_pid == 0)
-        {
-            //Child process closes input file descriptor.
-            close(fd[0]);
+        //Child process closes input file descriptor.
+        close(fd[0]);
 
-            //Checking sockets state, getting messages from clients and sending them to resender through the pipe.
-            if (waitToRead(s_set) != 0)
-                readMessages(fd[1], s_set);
-        }
-        else
-        {
-            //Parent process closes output file descriptor.
-            close(fd[1]);
-            //Reading data from the pipe and resending them to clients.
-            writeMessages(fd[0], s_set);
-        }
+        //Checking sockets state, getting messages from clients and sending them to resender through the pipe.
+        readMessages(fd[1], s_set);
+    }
+    else
+    {
+        //Parent process closes output file descriptor.
+        close(fd[1]);
+        //Reading data from the pipe and resending them to clients.
+        writeMessages(fd[0], s_set);
     }
 }
 
 
-//Checking for unprocessed messages. 
+//Checking for unprocessed messages.
 int waitToRead(sockfd_set *s_set)
 {
     int ready_sockfd_num = 0;
     struct timeval timeout;
 
-    //Set time limit.
-    timeout.tv_sec = 3;
-    timeout.tv_usec = 0;
+    while (1)
+    {
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+
+        printf("waiting for message\n");
+        printf("%d\n", s_set->count);
+
+        ready_sockfd_num = select(s_set->count + 4, &s_set->system_set, NULL, NULL, &timeout);
+
+        if (ready_sockfd_num == -1)
+            logError("select failed");
+
+        printf("Ready sockets: %d\n", ready_sockfd_num);
     
-    ready_sockfd_num = select(s_set->count, s_set->system_set, NULL, NULL, &timeout);
-
-    if (ready_sockfd_num == -1) 
-        logError("select failed");
-
-    return ready_sockfd_num;
+        return ready_sockfd_num;
+    }
 }
 
 
-//Getting messages from clients and writing them to pipe. 
-void readMessages(int fd, sockfd_set *s_set)  
+//Getting messages from clients and writing them to pipe.
+void readMessages(int fd, sockfd_set *s_set)
 {
     struct sockaddr_in clientAddr;
     //struct hostent *client;  //TODO
@@ -229,37 +243,43 @@ void readMessages(int fd, sockfd_set *s_set)
     int ret_code = 0;
     size_t bytesToWrite;
     size_t totalWritten = 0;
-    char confirmed_buff[] = "confirmed";
+    //char confirmed_buff[] = "confirmed";
     int len = sizeof(clientAddr);
 
-    for (int i = 0; i < s_set->count; i++)
+    while (1)
     {
-        if (FD_ISSET(s_set->set[i], s_set->system_set))
+        if (waitToRead(s_set) == 0)
+            continue;
+
+        for (int i = 0; i < s_set->count; i++)
         {
-            ret_code = recvfrom(s_set->set[i], local_mess.external.text, BUFF_SIZE, 0, (struct sockaddr *) &clientAddr, (socklen_t *)&len);
-            //client = gethostbyaddr((char*)&clientAddr.sin_addr.s_addr, sizeof(struct in_addr), AF_INET);
-
-            if(ret_code < 0)
-                logError("receiving data");
-            else
-                logProgress("receiving data.."); 
-
-            local_mess.external.sender_addr = clientAddr.sin_addr.s_addr;
-            local_mess.sockfd = s_set->set[i];
-
-            //Writing text of message and sender's address to pipe.
-            bytesToWrite = sizeof(struct internalProtocol);
-            while (1)
+            if (FD_ISSET(s_set->set[i], &s_set->system_set))
             {
-                ssize_t bytesWritten = write(fd, &local_mess + totalWritten, bytesToWrite - totalWritten);
-                
-                if ( bytesWritten <= 0 )
-                    break;
+                ret_code = recvfrom(s_set->set[i], local_mess.external.text, BUFF_SIZE, 0, (struct sockaddr *) &clientAddr, (socklen_t *)&len);
+                //client = gethostbyaddr((char*)&clientAddr.sin_addr.s_addr, sizeof(struct in_addr), AF_INET);
 
-                totalWritten += bytesWritten;
+                if(ret_code < 0)
+                    logError("receiving data");
+                else
+                    logProgress("receiving data..");
+
+                local_mess.external.sender_addr = clientAddr.sin_addr.s_addr;
+                local_mess.sockfd = s_set->set[i];
+
+                //Writing text of message and sender's address to pipe.
+                bytesToWrite = sizeof(struct internalProtocol);
+                while (1)
+                {
+                    ssize_t bytesWritten = write(fd, &local_mess + totalWritten, bytesToWrite - totalWritten);
+
+                    if ( bytesWritten <= 0 )
+                        break;
+
+                    totalWritten += bytesWritten;
+                }
             }
         }
-    }   
+    }
 }
 
 
@@ -281,7 +301,7 @@ void writeMessages(int fd, sockfd_set *s_set)
     while (1)
     {
         ssize_t bytesWritten = read(fd, &local_mess + totalWritten, bytesToWrite - totalWritten);
-                
+
         if ( bytesWritten <= 0 )
             break;
 
@@ -306,8 +326,8 @@ void writeMessages(int fd, sockfd_set *s_set)
             excludeFromSockfdSet(s_set->set[i], s_set);
         }
         else                                                                 //TODO remove log
-            logProgress("sending data..");        
-    }   
+            logProgress("sending data..");
+    }
 }
 
 
@@ -320,7 +340,7 @@ void logError(const char *errorMessage)
 
 void logProgress(const char *progressMessage)
 {
-    //fprintf(PROGRESS_LOG, "log: %s\n", progressMessage);
+    fprintf(PROGRESS_LOG, "log: %s\n", progressMessage);
 }
 
 void messageHistory(const char *heandle, int clientName, char* message)
@@ -342,26 +362,26 @@ sockfd_set *createSockfdSet()
 
     if (NULL != s_set) {
         //s_set->set = (unsigned short *)calloc(MAX_CONNECTION_NUM + 1, sizeof(unsigned short));
-        s_set->system_set = (fd_set *)calloc(1, sizeof(fd_set));
+        //s_set->system_set = (fd_set *)calloc(1, sizeof(fd_set));
 
-        if ((NULL == s_set->set) || (NULL == s_set->system_set)) {
+        if ((NULL == s_set->set) || (NULL == &s_set->system_set)) {
             free(s_set);
             logError("sockfd_set of fd_set allocating");
-            return NULL;   
+            return NULL;
         }
             s_set->count = 0;
             s_set->capacity = MAX_CONNECTION_NUM;
-    }   
+    }
     else {
-        logError("sockfd_set allocating");  
-        return NULL; 
+        logError("sockfd_set allocating");
+        return NULL;
     }
 
     return s_set;
 }
 
 //Conversion fields of external protocol structure to single text message for resending.
-void externalProocolToChar(externalProocol *external, char* buf) 
+void externalProocolToChar(externalProocol *external, char* buf)
 {
     int len = 0;
 /*
@@ -383,22 +403,21 @@ void externalProocolToChar(externalProocol *external, char* buf)
 }
 
 //Initializing sockfd structure.
-void initializeSockfdSet(sockfd_set *s_set, fd_set *f_set)
+void initializeSockfdSet(sockfd_set *s_set)
 {
-    s_set->count = 0;
+    s_set->count = 11;
     s_set->capacity = MAX_CONNECTION_NUM;
-    FD_ZERO(f_set);
+    FD_ZERO(&s_set->system_set);
     memset(s_set->set, 0, sizeof(s_set) * (s_set->capacity + 1));
-    s_set->system_set = f_set;
 }
 
 
 void addToSockfdSet(unsigned short sockfd, sockfd_set *s_set)
 {
     s_set->set[s_set->count] = sockfd;
-    FD_SET(sockfd, (s_set->system_set));
+    FD_SET(sockfd, (&s_set->system_set));
     s_set->count++;
-} 
+}
 
 //Excluding sockfd from fd_set and internal array;
 int excludeFromSockfdSet(unsigned short sockfd, sockfd_set *s_set)
@@ -418,7 +437,7 @@ int excludeFromSockfdSet(unsigned short sockfd, sockfd_set *s_set)
         s_set->set[index] = s_set->set[index + 1];
     }
 
-    FD_CLR(sockfd, s_set->system_set);
+    FD_CLR(sockfd, &s_set->system_set);
     s_set->count--;
 
     return 0;
