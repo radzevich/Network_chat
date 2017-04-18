@@ -22,6 +22,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <errno.h>
 
 #define CL_HOST_NAME_LEN 100
 #define MAX_CONNECTION_NUM 5
@@ -83,6 +84,8 @@ void externalProocolToChar(externalProocol *external, char* buf);
 int excludeFromSockfdSet(unsigned short sockfd, sockfd_set *s_set);
 //Adding sockfd to the set sructure.
 void addToSockfdSet(unsigned short sockfd, sockfd_set *s_set);
+//Reinitializing of fd_set structure for select.
+void reinitializeSet(sockfd_set *s_set);
 
 
 
@@ -125,7 +128,7 @@ int main(int argc, char *argv[])
 
     logProgress("waiting for connections..");
 
-    sock_shmid = shmget(IPC_PRIVATE, sizeof(sockfd_set), IPC_CREAT | 0777);
+    sock_shmid = shmget(IPC_PRIVATE, sizeof(sockfd_set), IPC_CREAT | 0666);
     //fd_shmid = shmget(IPC_PRIVATE, sizeof(fd_set) * MAX_CONNECTION_NUM, IPC_CREAT | 0666);
 
     //Creating child process and sharing memory with parental one.
@@ -154,13 +157,16 @@ int main(int argc, char *argv[])
             newsockfd = accept(sockfd, &cl_addr, &len);
 
             if (newsockfd < 0)
-                logError("accepting connection");
-            else
+                //logError("accepting connection");
+            //else
                 logProgress("connection accepted..");
 
             addToSockfdSet(newsockfd, s_set);
 
-            printf("socket added %d\n", newsockfd);
+            //int ret = waitToRead(s_set);
+            //printf("ready sock %d\n", ret);
+
+            printf("socket added %d\n", s_set->count);
         }
     }
 
@@ -190,9 +196,10 @@ void chatting(sockfd_set *s_set)
     }
 
 
-    if(reading_pid == 0)
+    if(reading_pid != 0)
     {
         //Child process closes input file descriptor.
+        printf("closed fd %d\n", fd[0]);
         close(fd[0]);
 
         //Checking sockets state, getting messages from clients and sending them to resender through the pipe.
@@ -201,6 +208,7 @@ void chatting(sockfd_set *s_set)
     else
     {
         //Parent process closes output file descriptor.
+        printf("closed fd %d\n", fd[1]);
         close(fd[1]);
         //Reading data from the pipe and resending them to clients.
         writeMessages(fd[0], s_set);
@@ -219,18 +227,21 @@ int waitToRead(sockfd_set *s_set)
         timeout.tv_sec = 2;
         timeout.tv_usec = 0;
 
+        reinitializeSet(s_set);
+
         printf("waiting for message\n");
-        printf("%d\n", s_set->count);
 
         ready_sockfd_num = select(s_set->count + 4, &s_set->system_set, NULL, NULL, &timeout);
 
         if (ready_sockfd_num == -1)
-            logError("select failed");
-
-        printf("Ready sockets: %d\n", ready_sockfd_num);
-    
-        return ready_sockfd_num;
+            printf("select failed %s %d\n", strerror(errno), s_set->set[s_set->count - 1]);
+        else if (ready_sockfd_num > 0)
+            break;
     }
+
+    printf("Ready sockets: %d\n", ready_sockfd_num);
+
+    return ready_sockfd_num;
 }
 
 
@@ -255,13 +266,15 @@ void readMessages(int fd, sockfd_set *s_set)
         {
             if (FD_ISSET(s_set->set[i], &s_set->system_set))
             {
+                memset(local_mess.external.text, 0, BUFF_SIZE);
                 ret_code = recvfrom(s_set->set[i], local_mess.external.text, BUFF_SIZE, 0, (struct sockaddr *) &clientAddr, (socklen_t *)&len);
                 //client = gethostbyaddr((char*)&clientAddr.sin_addr.s_addr, sizeof(struct in_addr), AF_INET);
 
                 if(ret_code < 0)
-                    logError("receiving data");
-                else
+                //    logError("receiving data");
+                //else
                     logProgress("receiving data..");
+                printf("Message: %s\n", local_mess.external.text);
 
                 local_mess.external.sender_addr = clientAddr.sin_addr.s_addr;
                 local_mess.sockfd = s_set->set[i];
@@ -405,17 +418,15 @@ void externalProocolToChar(externalProocol *external, char* buf)
 //Initializing sockfd structure.
 void initializeSockfdSet(sockfd_set *s_set)
 {
-    s_set->count = 11;
+    s_set->count = 0;
     s_set->capacity = MAX_CONNECTION_NUM;
-    FD_ZERO(&s_set->system_set);
-    memset(s_set->set, 0, sizeof(s_set) * (s_set->capacity + 1));
+    memset(s_set->set, 0, sizeof(*s_set));
 }
 
 
 void addToSockfdSet(unsigned short sockfd, sockfd_set *s_set)
 {
     s_set->set[s_set->count] = sockfd;
-    FD_SET(sockfd, (&s_set->system_set));
     s_set->count++;
 }
 
@@ -437,7 +448,6 @@ int excludeFromSockfdSet(unsigned short sockfd, sockfd_set *s_set)
         s_set->set[index] = s_set->set[index + 1];
     }
 
-    FD_CLR(sockfd, &s_set->system_set);
     s_set->count--;
 
     return 0;
@@ -447,5 +457,16 @@ void clearSockfdSet(sockfd_set *s_set)
 {
     free(s_set->set);
     free(s_set);
+}
+
+//Reinitializing of fd_set structure for select.
+void reinitializeSet(sockfd_set *s_set)
+{
+    //FD_ZERO(&s_set->system_set);
+    memset(&s_set->system_set, 0, sizeof(s_set->system_set));
+
+    for (int i = 0; i < s_set->count; i++) {
+        FD_SET(s_set->set[i], &s_set->system_set);
+    }
 }
 
