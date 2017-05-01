@@ -1,8 +1,8 @@
-/* A simple server in the internet domain using UDP
+/* A simple server in the internet domain using TCP
    The port number is passed as an argument
    This version runs forever, not forking off a separate
    process for each connection, but adding them to set
-   and checking for ability to exchange data using select()
+   and checking for ability to exchange data using select() function.
 */
 
 /**************************TODO*************************
@@ -23,6 +23,7 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <errno.h>
+#include <signal.h>
 
 #define CL_HOST_NAME_LEN 100
 #define MAX_CONNECTION_NUM 5
@@ -31,6 +32,9 @@
 #define PROGRESS_LOG stdout
 #define ERROR_LOG stderr
 #define MESSAGE_HISTORY stdout
+
+
+int exit_signal = -1;
 
 
 //Structure for exchanging data between server and clients.
@@ -77,7 +81,7 @@ void writeMessages(int fd, sockfd_set *s_set);
 //Initializing sockfd structure.
 void initializeSockfdSet(sockfd_set *s_set);
 //Exchanging messages between reading and writing server processes
-void chatting(sockfd_set *s_set);
+void chatting(sockfd_set s_set, pid_t pid[2]);
 //Conversion fields of external protocol structure to single text message for resending.
 void externalProocolToChar(externalProocol *external, char* buf);
 //Excluding sockfd from fd_set and internal array;
@@ -86,16 +90,19 @@ int excludeFromSockfdSet(unsigned short sockfd, sockfd_set *s_set);
 void addToSockfdSet(unsigned short sockfd, sockfd_set *s_set);
 //Reinitializing of fd_set structure for select.
 void reinitializeSet(sockfd_set *s_set);
-
+/*void setExitSignal(int signo);
+void checkExitSignal(int exit_signal);
+void createSignalHeandler(struct sigaction *act);
+*/
 
 
 //Main process. Creating socket and starting to listen for connections.
 int main(int argc, char *argv[])
 {
     int sockfd, portno, retCode, newsockfd, sock_shmid, fd_shmid;
-    sockfd_set *s_set = NULL;
+    sockfd_set s_set;
     socklen_t len;
-    pid_t childpid;
+    pid_t childpid[2];
     struct sockaddr_in addr;
     struct sockaddr cl_addr;
 
@@ -128,11 +135,11 @@ int main(int argc, char *argv[])
 
     logProgress("waiting for connections..");
 
-    sock_shmid = shmget(IPC_PRIVATE, sizeof(sockfd_set), IPC_CREAT | 0666);
+    //sock_shmid = shmget(IPC_PRIVATE, sizeof(sockfd_set), IPC_CREAT | 0666);
     //fd_shmid = shmget(IPC_PRIVATE, sizeof(fd_set) * MAX_CONNECTION_NUM, IPC_CREAT | 0666);
 
     //Creating child process and sharing memory with parental one.
-    if ((childpid = fork()) == 0)
+    /*if ((childpid = fork()) == 0)
     {
         if (NULL == (s_set = (sockfd_set *)shmat(sock_shmid, NULL, 0))) {
             logError("allocating sockfd_set");
@@ -141,33 +148,38 @@ int main(int argc, char *argv[])
 
         chatting(s_set);
     }
-    else
+    
+    
+    s_set = (sockfd_set *)shmat(sock_shmid, NULL, 0);
+    //f_set = (fd_set *)shmat(fd_shmid, NULL, 0);*/
+    initializeSockfdSet(&s_set);
+    printf("initialized\n");
+
+    listen(sockfd, MAX_CONNECTION_NUM);      
+
+    while (!0)
     {
-        s_set = (sockfd_set *)shmat(sock_shmid, NULL, 0);
-        //f_set = (fd_set *)shmat(fd_shmid, NULL, 0);
-        initializeSockfdSet(s_set);
-        printf("initialized\n");
+        len = sizeof(cl_addr);
 
-        listen(sockfd, MAX_CONNECTION_NUM);
+        chatting(s_set, childpid);
+        //newsockfd = accept(sockfd, &addr, &len);
+        newsockfd = accept(sockfd, &cl_addr, &len);
 
-        while (!0)
-        {
-            len = sizeof(cl_addr);
-            //newsockfd = accept(sockfd, &addr, &len);
-            newsockfd = accept(sockfd, &cl_addr, &len);
+        kill(childpid[0], SIGKILL);
+        kill(childpid[1], SIGKILL);
 
-            if (newsockfd < 0)
-                //logError("accepting connection");
-            //else
-                logProgress("connection accepted..");
+        if (newsockfd < 0)
+            logError("accepting connection");
+        else
+            logProgress("connection accepted..");
 
-            addToSockfdSet(newsockfd, s_set);
 
-            //int ret = waitToRead(s_set);
-            //printf("ready sock %d\n", ret);
+        addToSockfdSet(newsockfd, &s_set);
 
-            printf("socket added %d\n", s_set->count);
-        }
+        //int ret = waitToRead(s_set);
+        //printf("ready sock %d\n", ret);
+
+        printf("socket added %d\n", s_set.set[s_set.count - 1]);
     }
 
     return 0;
@@ -175,43 +187,60 @@ int main(int argc, char *argv[])
 
 
 //Exchanging messages between reading and writing server processes
-void chatting(sockfd_set *s_set)
+void chatting(sockfd_set s_set, pid_t pid[2])
 {
-    FD_ZERO(&s_set->system_set);
+    FD_ZERO(&s_set.system_set);
+    int fd_shmid;
     int fd[2];
-    pid_t reading_pid;
 
+    //Creating pipe for exchanging data between reading and writing processes.
     pipe(fd);
 
-    if((reading_pid = fork()) == -1)
+    //Creating reading child process from the main one. 
+    if((pid[0] = fork()) == -1)
     {
         logError("fork");
         exit(1);
     }
-    else if (0 == reading_pid){
-        logProgress("reading process created");
-    }
-    else {
-        logProgress("writing process created");
-    }
-
-
-    if(reading_pid != 0)
+    else if (0 == pid[0])
     {
+        logProgress("reading process created");
+
         //Child process closes input file descriptor.
-        printf("closed fd %d\n", fd[0]);
-        close(fd[0]);
+        //close(fd[0]);
+        dup2(1, fd[0]);
 
         //Checking sockets state, getting messages from clients and sending them to resender through the pipe.
-        readMessages(fd[1], s_set);
+        while (1)
+        {
+            if (waitToRead(&s_set) > 0)
+                readMessages(fd[1], &s_set);
+        }
     }
+    //Creating writing child process from the main one. 
     else
     {
-        //Parent process closes output file descriptor.
-        printf("closed fd %d\n", fd[1]);
+        if ((pid[1] = fork()) == -1)
+        {
+            logError("fork");
+            exit(1);
+        }
+        else if (0 == pid[1])
+        {
+            logProgress("writing process created");
+
+            //Parent process closes output file descriptor.
+            //close(fd[1]);
+            dup2(1, fd[1]);
+
+            //Reading data from the pipe and resending them to clients.
+            while (1)
+                writeMessages(fd[0], &s_set);
+        }
+    }
+    if (pid > 0) {
+        close(fd[0]);
         close(fd[1]);
-        //Reading data from the pipe and resending them to clients.
-        writeMessages(fd[0], s_set);
     }
 }
 
@@ -219,17 +248,18 @@ void chatting(sockfd_set *s_set)
 //Checking for unprocessed messages.
 int waitToRead(sockfd_set *s_set)
 {
-    int ready_sockfd_num = 0;
+    int ready_sockfd_num;
     struct timeval timeout;
 
     while (1)
     {
+        ready_sockfd_num = 0;
         timeout.tv_sec = 2;
         timeout.tv_usec = 0;
 
         reinitializeSet(s_set);
 
-        printf("waiting for message\n");
+        printf("Waiting for message..\n");
 
         ready_sockfd_num = select(s_set->count + 4, &s_set->system_set, NULL, NULL, &timeout);
 
@@ -238,8 +268,6 @@ int waitToRead(sockfd_set *s_set)
         else if (ready_sockfd_num > 0)
             break;
     }
-
-    printf("Ready sockets: %d\n", ready_sockfd_num);
 
     return ready_sockfd_num;
 }
@@ -257,39 +285,34 @@ void readMessages(int fd, sockfd_set *s_set)
     //char confirmed_buff[] = "confirmed";
     int len = sizeof(clientAddr);
 
-    while (1)
+    for (int i = 0; i < s_set->count; i++)
     {
-        if (waitToRead(s_set) == 0)
-            continue;
-
-        for (int i = 0; i < s_set->count; i++)
+        if (FD_ISSET(s_set->set[i], &s_set->system_set))
         {
-            if (FD_ISSET(s_set->set[i], &s_set->system_set))
+            memset(local_mess.external.text, 0, BUFF_SIZE);
+            ret_code = recvfrom(s_set->set[i], local_mess.external.text, BUFF_SIZE, 0, (struct sockaddr *) &clientAddr, (socklen_t *)&len);
+            //client = gethostbyaddr((char*)&clientAddr.sin_addr.s_addr, sizeof(struct in_addr), AF_INET);
+
+            if(ret_code < 0)
+                printf("receiving data: %s", strerror(errno));
+            else
+                logProgress("receiving data..");
+            printf("Message: %s\n", local_mess.external.text);
+
+            local_mess.external.sender_addr = clientAddr.sin_addr.s_addr;
+            local_mess.sockfd = s_set->set[i];
+
+            //Writing text of message and sender's address to pipe.
+            bytesToWrite = sizeof(struct internalProtocol);
+            
+            while (1)
             {
-                memset(local_mess.external.text, 0, BUFF_SIZE);
-                ret_code = recvfrom(s_set->set[i], local_mess.external.text, BUFF_SIZE, 0, (struct sockaddr *) &clientAddr, (socklen_t *)&len);
-                //client = gethostbyaddr((char*)&clientAddr.sin_addr.s_addr, sizeof(struct in_addr), AF_INET);
+                ssize_t bytesWritten = write(fd, &local_mess + totalWritten, bytesToWrite - totalWritten);
 
-                if(ret_code < 0)
-                //    logError("receiving data");
-                //else
-                    logProgress("receiving data..");
-                printf("Message: %s\n", local_mess.external.text);
-
-                local_mess.external.sender_addr = clientAddr.sin_addr.s_addr;
-                local_mess.sockfd = s_set->set[i];
-
-                //Writing text of message and sender's address to pipe.
-                bytesToWrite = sizeof(struct internalProtocol);
-                while (1)
-                {
-                    ssize_t bytesWritten = write(fd, &local_mess + totalWritten, bytesToWrite - totalWritten);
-
-                    if ( bytesWritten <= 0 )
-                        break;
+                if ( bytesWritten <= 0 )
+                    break;
 
                     totalWritten += bytesWritten;
-                }
             }
         }
     }
@@ -311,12 +334,12 @@ void writeMessages(int fd, sockfd_set *s_set)
     //Reading text of message and sender's address from the pipe.
     bytesToWrite = sizeof(local_mess);
 
-    while (1)
+    //while (1)
     {
         ssize_t bytesWritten = read(fd, &local_mess + totalWritten, bytesToWrite - totalWritten);
 
-        if ( bytesWritten <= 0 )
-            break;
+        //if ( bytesWritten <= 0 )
+        //    break;
 
         totalWritten += bytesWritten;
     }
@@ -327,9 +350,9 @@ void writeMessages(int fd, sockfd_set *s_set)
     //Resending messages from server to clients.
     for (int i = 0; i < s_set->count; i++)
     {
-        if (s_set->set[i] != local_mess.sockfd)
-            ret_code = sendto(s_set->set[i], resending_mess, NICKNAME_LENGTH + BUFF_SIZE, 0, (struct sockaddr *)&clientAddr, len);
-        else
+        //if (s_set->set[i] != local_mess.sockfd)
+            //ret_code = sendto(s_set->set[i], resending_mess, NICKNAME_LENGTH + BUFF_SIZE, 0, (struct sockaddr *)&clientAddr, len);
+        //else
             //If current client is sender, server confirmes getting message instead of resending his message back.
             ret_code = sendto(s_set->set[i], confirmed_buff, strlen(confirmed_buff), 0, (struct sockaddr *)&clientAddr, len);
 
@@ -339,7 +362,8 @@ void writeMessages(int fd, sockfd_set *s_set)
             excludeFromSockfdSet(s_set->set[i], s_set);
         }
         else                                                                 //TODO remove log
-            logProgress("sending data..");
+            //logProgress("sending data.. %d", s_set->set[i]);
+            printf("sending data.. %d\n", s_set->set[i]);
     }
 }
 
@@ -462,11 +486,38 @@ void clearSockfdSet(sockfd_set *s_set)
 //Reinitializing of fd_set structure for select.
 void reinitializeSet(sockfd_set *s_set)
 {
-    //FD_ZERO(&s_set->system_set);
-    memset(&s_set->system_set, 0, sizeof(s_set->system_set));
+    FD_ZERO(&s_set->system_set);
+    //memset(&s_set->system_set, 0, sizeof(s_set->system_set));
 
     for (int i = 0; i < s_set->count; i++) {
         FD_SET(s_set->set[i], &s_set->system_set);
     }
 }
+
+/*
+void checkExitSignal(int exit_signal)
+{
+    printf("exit %d\n", getpid());
+    if (exit_signal == SIGINT)
+        exit;
+}
+
+void setExitSignal(int signo)
+{
+    if (SIGINT == signo)
+        exit_signal = SIGINT;
+}
+
+void createSignalHeandler(struct sigaction *act)
+{
+    sigset_t set; 
+
+    memset(act, 0, sizeof(act));
+    act->sa_handler = setExitSignal;
+    //sigemptyset(&set);                                                             
+    //sigaddset(&set, SIGINT); 
+    //act->sa_mask = set;
+    sigaction(SIGINT, act, 0);
+}
+*/
 
