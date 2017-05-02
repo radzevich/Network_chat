@@ -6,9 +6,20 @@
 #include <netdb.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 
 #define BUFF_SIZE 1024
+
+void sigchld_handler (int signum)
+{
+    pid_t p;
+    int status;
+
+    p = wait(&status);
+    printf("Connection was terminated\n");
+    exit(0);
+}
 
 int main(int argc, char *argv[])
 {
@@ -16,6 +27,10 @@ int main(int argc, char *argv[])
     int sockfd, retCode, pid;
     char buffer[BUFF_SIZE];
     struct hostent *server;
+    struct sigaction action;
+
+    action.sa_handler = sigchld_handler;
+    sigaction(SIGCHLD, &action, 0);
 
     if (argc < 3) {
         printf("usage: client < ip address >\n");
@@ -48,6 +63,8 @@ int main(int argc, char *argv[])
     else
         printf("Connected to the server...\n");
 
+    printf("Chatting: \n");
+
     if ((pid = fork()) < 0) {
         printf("Error creating process: %s\n", strerror(errno));
     }
@@ -56,18 +73,13 @@ int main(int argc, char *argv[])
         while (1)
         {
             memset(buffer, 0, BUFF_SIZE);
-            printf("Enter your message(s): ");
             fgets(buffer, BUFF_SIZE, stdin);
             retCode = sendto(sockfd, buffer, BUFF_SIZE, MSG_CONFIRM, (struct sockaddr *) &addr, sizeof(addr));
-            printf("RET_w: %d\n", retCode);
-            sleep(2);
 
             if (retCode <= 0) {
                 printf("Error sending data!\n\t-%s", buffer);
                 break;
             }
-            else
-                printf("sended\n");
         }
     }
     else
@@ -77,10 +89,9 @@ int main(int argc, char *argv[])
             memset(buffer, 0, BUFF_SIZE);
                   
             retCode = recvfrom(sockfd, buffer, BUFF_SIZE, 0, NULL, NULL);
-            printf("RET_r: %d\n", retCode);
-            sleep(2);   
             if (retCode <= 0) {
                 printf("Error receiving data!\n");
+                kill(getppid(), SIGCHLD);
                 break;
             }
             else {
